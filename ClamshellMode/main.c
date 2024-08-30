@@ -3,6 +3,9 @@
 #include <shlobj.h>
 #include <stdio.h>
 #include <io.h>
+#include <Dbt.h>
+#include <initguid.h>
+#include <Ntddvdeo.h>
 
 #pragma comment(lib, "powrprof.lib")
 
@@ -96,7 +99,7 @@ static void SetLidAction(const BOOL sleep) {
 	}
 }
 
-static BOOL ExternalDisplayConnected(const WCHAR* internalDisplayDeviceID) {
+static BOOL ExternalDisplayConnected() {
 	DISPLAY_DEVICE device = { .cb = sizeof(DISPLAY_DEVICE) };
 	DWORD i = 0;
 
@@ -105,9 +108,27 @@ static BOOL ExternalDisplayConnected(const WCHAR* internalDisplayDeviceID) {
 		DWORD j = 0;
 
 		while (EnumDisplayDevicesW(device.DeviceName, j++, &device2, 0) != 0) {
-			if (wcscmp(device2.DeviceID, internalDisplayDeviceID) == 0) {
+			if (wcscmp(device2.DeviceID, INTERNAL_DISPLAY_ID) == 0) {
 				continue;
 			}
+			if (device2.StateFlags & DISPLAY_DEVICE_ACTIVE) {
+				return TRUE;
+			}
+		}
+	}
+
+	return FALSE;
+}
+
+static BOOL HasAnyActiveDisplays() {
+	DISPLAY_DEVICE device = { .cb = sizeof(DISPLAY_DEVICE) };
+	DWORD i = 0;
+
+	while (EnumDisplayDevicesW(NULL, i++, &device, 0) != 0) {
+		DISPLAY_DEVICE device2 = { .cb = sizeof(DISPLAY_DEVICE) };
+		DWORD j = 0;
+
+		while (EnumDisplayDevicesW(device.DeviceName, j++, &device2, 0) != 0) {
 			if (device2.StateFlags & DISPLAY_DEVICE_ACTIVE) {
 				return TRUE;
 			}
@@ -131,10 +152,21 @@ static void PopulateDisplayDevices(HWND hComboBox) {
 	}
 }
 
+static void HandleDisplayChange() {
+	if (ExternalDisplayConnected()) {
+		SetLidAction(FALSE);
+	}
+	else {
+		SetLidAction(TRUE);
+	}
+}
+
 static LRESULT CALLBACK WindowProcedure(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 	static NOTIFYICONDATA nid = { 0 };
 	static HWND hComboBox = NULL;
 	static HICON hIcon = NULL;  // Icon handle for reuse
+
+	static DWORD lidState = 1;
 
 	switch (msg) {
 	case WM_CREATE:
@@ -157,7 +189,9 @@ static LRESULT CALLBACK WindowProcedure(HWND hwnd, UINT msg, WPARAM wParam, LPAR
 			if (_waccess(iniPath, 0) == -1) {
 				PostMessageW(hwnd, WM_COMMAND, ID_TRAY_SET_DISPLAY, 0);
 			}
-
+			else {
+				HandleDisplayChange();
+			}
 		}
 		break;
 
@@ -193,11 +227,38 @@ static LRESULT CALLBACK WindowProcedure(HWND hwnd, UINT msg, WPARAM wParam, LPAR
 		break;
 
 	case WM_DISPLAYCHANGE:
-		if (ExternalDisplayConnected(INTERNAL_DISPLAY_ID)) {
-			SetLidAction(FALSE);
+		HandleDisplayChange();
+		break;
+
+	case WM_POWERBROADCAST:
+		if (wParam == PBT_POWERSETTINGCHANGE) {
+			POWERBROADCAST_SETTING* pbs = (POWERBROADCAST_SETTING*)lParam;
+			if (IsEqualGUID(&pbs->PowerSetting, &GUID_LIDSWITCH_STATE_CHANGE)) {
+				lidState = *(DWORD*)pbs->Data;
+				printf("Lid state: %d\n", lidState);
+			}
 		}
-		else {
+		break;
+
+	case WM_DEVICECHANGE:
+		if (wParam == DBT_DEVICEREMOVECOMPLETE) // handle device removal
+		{
+			PDEV_BROADCAST_HDR pHdr = (PDEV_BROADCAST_HDR)lParam;
+			
+			if (pHdr->dbch_devicetype != DBT_DEVTYP_DEVICEINTERFACE) // if device is not monitor
+			{
+				break;
+			}
+			if (HasAnyActiveDisplays()) { // if any monitor is active
+				break;
+			}
+			if (lidState != 0) { // if lid is not closed
+				break;
+			}
+
+			printf("Suspending\n");
 			SetLidAction(TRUE);
+			SetSuspendState(FALSE, FALSE, FALSE);
 		}
 		break;
 
@@ -284,7 +345,20 @@ static LRESULT CALLBACK DisplayWindowProcedure(HWND hwnd, UINT msg, WPARAM wPara
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine, int nCmdShow)
 {
-	HANDLE mutex = CreateMutexW(NULL, TRUE, L"Global\\ClamshellMode");
+#if NDEBUG == 0
+	AllocConsole();
+	FILE* file;
+	freopen_s(&file, "CONOUT$", "w", stdout);
+	freopen_s(&file, "CONIN$", "r", stdin);
+	freopen_s(&file, "CONOUT$", "w", stderr);
+#endif
+
+	HWND hwnd = NULL;
+	HANDLE mutex = NULL;
+	HPOWERNOTIFY hLidNotify = NULL;
+	HDEVNOTIFY hDeviceNotify = NULL;
+
+	mutex = CreateMutexW(NULL, TRUE, L"Global\\ClamshellMode");
 	if (GetLastError() == ERROR_ALREADY_EXISTS || mutex == NULL) {
 		return 1;
 	}
@@ -307,15 +381,27 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
 	wc.hIcon = LoadIconW(GetModuleHandleW(L"shell32.dll"), MAKEINTRESOURCEW(284));  // Set the icon for display window
 	RegisterClassW(&wc);
 
-	HWND hwnd = CreateWindowExW(0, className, WINDOW_NAME,
+	hwnd = CreateWindowExW(0, className, WINDOW_NAME,
 		0, CW_USEDEFAULT, CW_USEDEFAULT,
 		0, 0, NULL, NULL, hInstance, NULL);
+
+
+	hLidNotify = RegisterPowerSettingNotification(hwnd, &GUID_LIDSWITCH_STATE_CHANGE, DEVICE_NOTIFY_WINDOW_HANDLE);
+
+	DEV_BROADCAST_DEVICEINTERFACE filter = { 0 };
+	filter.dbcc_devicetype = DBT_DEVTYP_DEVICEINTERFACE;
+	filter.dbcc_size = sizeof(DEV_BROADCAST_DEVICEINTERFACE);
+	filter.dbcc_classguid = GUID_DEVINTERFACE_MONITOR;
+	hDeviceNotify = RegisterDeviceNotificationW(hwnd, &filter, DEVICE_NOTIFY_WINDOW_HANDLE);
 
 	MSG msg = { 0 };
 	while (GetMessageW(&msg, NULL, 0, 0)) {
 		TranslateMessage(&msg);
 		DispatchMessageW(&msg);
 	}
+
+	UnregisterPowerSettingNotification(hLidNotify);
+	UnregisterDeviceNotification(hDeviceNotify);
 
 	CloseHandle(mutex);
 	return 0;
