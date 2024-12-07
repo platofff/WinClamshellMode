@@ -120,24 +120,6 @@ static BOOL ExternalDisplayConnected() {
 	return FALSE;
 }
 
-static BOOL HasAnyActiveDisplays() {
-	DISPLAY_DEVICE device = { .cb = sizeof(DISPLAY_DEVICE) };
-	DWORD i = 0;
-
-	while (EnumDisplayDevicesW(NULL, i++, &device, 0) != 0) {
-		DISPLAY_DEVICE device2 = { .cb = sizeof(DISPLAY_DEVICE) };
-		DWORD j = 0;
-
-		while (EnumDisplayDevicesW(device.DeviceName, j++, &device2, 0) != 0) {
-			if (device2.StateFlags & DISPLAY_DEVICE_ACTIVE) {
-				return TRUE;
-			}
-		}
-	}
-
-	return FALSE;
-}
-
 static void PopulateDisplayDevices(HWND hComboBox) {
 	DISPLAY_DEVICE device = { .cb = sizeof(DISPLAY_DEVICE) };
 	DWORD i = 0;
@@ -249,7 +231,7 @@ static LRESULT CALLBACK WindowProcedure(HWND hwnd, UINT msg, WPARAM wParam, LPAR
 			{
 				break;
 			}
-			if (HasAnyActiveDisplays()) { // if any monitor is active
+			if (ExternalDisplayConnected()) { // if any monitor is active
 				break;
 			}
 			if (lidState != 0) { // if lid is not closed
@@ -347,7 +329,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
 {
 #if NDEBUG == 0
 	AllocConsole();
-	FILE* file;
+	FILE* file = NULL;
 	freopen_s(&file, "CONOUT$", "w", stdout);
 	freopen_s(&file, "CONIN$", "r", stdin);
 	freopen_s(&file, "CONOUT$", "w", stderr);
