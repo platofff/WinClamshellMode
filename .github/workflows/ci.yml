@@ -15,11 +15,17 @@ jobs:
       - name: Add msbuild to PATH
         uses: microsoft/setup-msbuild@v2
 
-      - name: Build ClamshellMode
+      - name: Build ClamshellMode (Release)
         run: msbuild ClamshellMode.sln /p:Configuration=Release /p:Platform=x64
+        timeout-minutes: 30
+
+      - name: Build ClamshellMode (Debug)
+        run: msbuild ClamshellMode.sln /p:Configuration=Debug /p:Platform=x64
         timeout-minutes: 30
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: x64/Release/ClamshellMode.exe
+          files: |
+            x64/Release/ClamshellMode.exe#ClamshellMode-Release.exe
+            x64/Debug/ClamshellMode.exe#ClamshellMode-Debug.exe
